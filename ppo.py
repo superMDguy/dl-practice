@@ -44,6 +44,14 @@ def get_env(render_mode=None):
         env.close()
 
 
+@torch.no_grad()
+def _init_weights(m: nn.Module):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.orthogonal_(m.weight, np.sqrt(2))
+        if m.bias is not None:
+            m.bias.data.fill_(0.0)
+
+
 class ActorCritic(nn.Module):
     def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 64):
         super().__init__()
@@ -55,6 +63,8 @@ class ActorCritic(nn.Module):
         )
         self.policy_logits = nn.Linear(hidden_size, action_dim)
         self.value = nn.Linear(hidden_size, 1)
+
+        self.apply(_init_weights)
 
     def __call__(self, x: Tensor) -> Tuple[Categorical, Tensor]:
         return super().__call__(x)
