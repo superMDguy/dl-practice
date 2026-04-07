@@ -7,6 +7,7 @@ warnings.filterwarnings(
 import argparse
 import multiprocessing as mp
 import random
+import time
 from contextlib import contextmanager
 from typing import Tuple
 
@@ -183,6 +184,7 @@ def train(
 
     for i in range(n_rollouts):
         print(f"\n=== ROLLOUT {i + 1} ===")
+        rollout_start = time.perf_counter()
         with mp.Pool(n_actors) as pool:
             results = pool.starmap(rollout, [(model.cpu(), T, gamma, lambd)] * n_actors)
 
@@ -203,6 +205,12 @@ def train(
 
         print(f"Avg. reward: {np.mean(all_avg_rewards):.2f}")
 
+        rollout_secs = time.perf_counter() - rollout_start
+        n_steps = n_actors * T
+        print(
+            f"[perf] simulated {n_steps} steps in {rollout_secs:.2f} secs (avg. {rollout_secs / n_steps * 1000:.3f} ms/step) "
+        )
+
         model = model.to(device)
         model.train()
         # Create a simple dataset and dataloader for batching
@@ -213,6 +221,7 @@ def train(
 
         j = 0
         approx_kl = 0.0
+        train_start = time.perf_counter()
         while approx_kl < kl_target:
             running_loss = 0.0
             kl_estimates = []
@@ -247,6 +256,10 @@ def train(
                 f"\tEpoch {j + 1}, loss {(running_loss / len(dataloader)):.2f}, kl {approx_kl:.3f}"
             )
             j += 1
+        train_secs = time.perf_counter() - train_start
+        print(
+            f"[perf] trained {j} epochs in {train_secs:.2f} seconds (avg. {train_secs / j:.3f} secs/epoch)"
+        )
 
     print("\n=== TRAINING COMPLETE — running trained policy ===")
     run_trained(model)
