@@ -55,6 +55,9 @@ class ActorCritic(nn.Module):
         self.policy_logits = nn.Linear(hidden_size, action_dim)
         self.value = nn.Linear(hidden_size, 1)
 
+    def __call__(self, x: Tensor) -> Tuple[Categorical, Tensor]:
+        return super().__call__(x)
+
     def forward(self, x: torch.Tensor) -> Tuple[Categorical, Tensor]:
         h = self.trunk(x)
         logits = self.policy_logits(h)
@@ -75,7 +78,7 @@ def ppo_loss(
     c2: float = 0.01,
 ) -> Tuple[Tensor, Tensor]:  # (B, ); (B, )
     # Clip Loss
-    actions_dist, value = model.forward(state)
+    actions_dist, value = model(state)
     actions_logp = actions_dist.log_prob(action)  # (B, )
     ratio = torch.exp(actions_logp - action_logp)  # (B, )
 
@@ -112,15 +115,15 @@ def rollout(
         observation, _ = env.reset()
         for t in range(T):
             with torch.no_grad():
-                action_dist, pred_value = model.forward(torch.tensor(observation))
+                action_dist, pred_value = model(torch.from_numpy(observation))
                 action = action_dist.sample()
 
-            action_logps[t] = action_dist.log_prob(action).detach()
-            action = action.detach().item()
+            action_logps[t] = action_dist.log_prob(action)
+            action = action.item()
 
             states[t] = observation
             actions[t] = action
-            value_ests[t] = pred_value.detach().item()
+            value_ests[t] = pred_value.item()
 
             observation, reward, terminated, truncated, _ = env.step(action)
 
@@ -131,8 +134,8 @@ def rollout(
     avg_episode_reward = rewards.sum() / max(dones.sum(), 1)
 
     with torch.no_grad():
-        _, last_pred_value = model.forward(torch.tensor(observation))
-        last_pred_value = last_pred_value.detach().item()
+        _, last_pred_value = model(torch.tensor(observation))
+        last_pred_value = last_pred_value.item()
 
     advantages = np.zeros(T, dtype=np.float32)
     # Special case for final state (no future rewards)
@@ -201,6 +204,7 @@ def train(
         print(f"Avg. reward: {np.mean(all_avg_rewards):.2f}")
 
         model = model.to(device)
+        model.train()
         # Create a simple dataset and dataloader for batching
         dataset = torch.utils.data.TensorDataset(
             all_states, all_actions, all_action_logps, all_advantages, all_values
@@ -258,7 +262,7 @@ def run_trained(model: ActorCritic, n_episodes: int = 5):
             done = False
             while not done:
                 with torch.no_grad():
-                    action_dist, _ = model.forward(torch.tensor(observation))
+                    action_dist, _ = model(torch.from_numpy(observation))
                     action = action_dist.sample().item()
                 observation, reward, terminated, truncated, _ = env.step(action)
                 total_reward += float(reward)
