@@ -29,9 +29,9 @@ else:
     device = torch.device("cpu")
 
 
-ENV_NAME = "CartPole-v1"
-ENV_STATE_DIM = 4
-ENV_ACTION_DIM = 2
+ENV_NAME = "LunarLander-v3"
+ENV_STATE_DIM = 8
+ENV_ACTION_DIM = 4
 
 
 @contextmanager
@@ -65,15 +65,15 @@ class ActorCritic(nn.Module):
 
 def ppo_loss(
     model: ActorCritic,
+    eps: float,
     action_logp: Tensor,  # (B, )
     state: Tensor,  # (B, state)
     action: Tensor,  # (B, )
     advantage: Tensor,  # (B, )
     value_target: Tensor,  # (B, )
-    eps: float = 0.2,
     c1: float = 0.5,
     c2: float = 0.01,
-) -> Tensor:  # (B, )
+) -> Tuple[Tensor, Tensor]:  # (B, ); (B, )
     # Clip Loss
     actions_dist, value = model.forward(state)
     actions_logp = actions_dist.log_prob(action)  # (B, )
@@ -86,7 +86,7 @@ def ppo_loss(
     value_loss = F.mse_loss(value, value_target)
     entropy_loss = -actions_dist.entropy().mean()
 
-    return clip_loss + c1 * value_loss + c2 * entropy_loss
+    return clip_loss + c1 * value_loss + c2 * entropy_loss, ratio
 
 
 def normalize(x: Tensor, eps: float = 1e-8) -> Tensor:
@@ -163,14 +163,23 @@ def rollout(
 
 
 def train(
-    n_rollouts: int = 32, n_actors=16, T=512, gamma=0.99, lambd=0.95, K=5, bs=128
+    n_rollouts: int = 64,
+    n_actors=16,
+    T=512,
+    gamma=0.99,
+    lambd=0.95,
+    bs=128,
+    eps: float = 0.2,
 ):
     model = ActorCritic(ENV_STATE_DIM, ENV_ACTION_DIM)
     model.compile()
-    optim = torch.optim.Adam(model.parameters(), lr=3e-3)
+    # TODO: derive proper LR?
+    optim = torch.optim.Adam(model.parameters(), lr=8e-4)
+    # Derived from clip param: avg per-sample KL when the ratio sits at the clip boundary [1-eps, 1+eps].
+    kl_target = -np.log(1 - eps**2) / 2
 
     for i in range(n_rollouts):
-        print(f"\n=== ROLOUT {i + 1} ===")
+        print(f"\n=== ROLLOUT {i + 1} ===")
         with mp.Pool(n_actors) as pool:
             results = pool.starmap(rollout, [(model.cpu(), T, gamma, lambd)] * n_actors)
 
@@ -198,8 +207,11 @@ def train(
         )
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=bs, shuffle=True)
 
-        for j in range(K):
+        j = 0
+        approx_kl = 0.0
+        while approx_kl < kl_target:
             running_loss = 0.0
+            kl_estimates = []
             for (
                 batch_states,
                 batch_actions,
@@ -208,20 +220,29 @@ def train(
                 batch_values,
             ) in dataloader:
                 optim.zero_grad()
-                loss = ppo_loss(
+                loss, ratio = ppo_loss(
                     model,
+                    eps,
                     batch_action_logps,
                     batch_states,
                     batch_actions,
                     batch_advantages,
                     batch_values,
                 )
+                kl_estimates.append(
+                    # http://joschu.net/blog/kl-approx.html
+                    ((ratio - 1) - torch.log(ratio)).mean().item()
+                )
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 optim.step()
                 running_loss += loss.item()
 
-            print(f"\tEpoch {j + 1}, loss {(running_loss / len(dataloader)):.2f}")
+            approx_kl = np.mean(kl_estimates)
+            print(
+                f"\tEpoch {j + 1}, loss {(running_loss / len(dataloader)):.2f}, kl {approx_kl:.3f}"
+            )
+            j += 1
 
     print("\n=== TRAINING COMPLETE — running trained policy ===")
     run_trained(model)
