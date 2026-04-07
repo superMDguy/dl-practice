@@ -44,27 +44,25 @@ def get_env(render_mode=None):
         env.close()
 
 
+# https://github.com/vwxyzjn/cleanrl/blob/004f8a086a892a2a180f4dd332b90d83a968aa7a/cleanrl/ppo.py#L94
 @torch.no_grad()
-def _init_weights(m: nn.Module):
-    if isinstance(m, nn.Linear):
-        torch.nn.init.orthogonal_(m.weight, np.sqrt(2))
-        if m.bias is not None:
-            m.bias.data.fill_(0.0)
+def layer_init(layer: nn.Linear, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
 
 
 class ActorCritic(nn.Module):
     def __init__(self, state_dim: int, action_dim: int, hidden_size: int = 64):
         super().__init__()
         self.trunk = nn.Sequential(
-            nn.Linear(state_dim, hidden_size),
+            layer_init(nn.Linear(state_dim, hidden_size)),
             nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
             nn.ReLU(),
         )
-        self.policy_logits = nn.Linear(hidden_size, action_dim)
-        self.value = nn.Linear(hidden_size, 1)
-
-        self.apply(_init_weights)
+        self.policy_logits = layer_init(nn.Linear(hidden_size, action_dim), std=0.01)
+        self.value = layer_init(nn.Linear(hidden_size, 1), std=1.0)
 
     def __call__(self, x: Tensor) -> Tuple[Categorical, Tensor]:
         return super().__call__(x)
