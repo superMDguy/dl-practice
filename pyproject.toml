@@ -5,15 +5,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "gymnasium[box2d]>=1.2.3",
-    "matplotlib>=3.10.8",
-    "numpy>=2.4.4",
-    "swig>=4.4.1",
-    "torch>=2.11.0",
-    "torchvision>=0.26.0",
+  "gymnasium[box2d]>=1.2.3",
+  "matplotlib>=3.10.8",
+  "numpy>=2.4.4",
+  "setuptools<81",
+  "swig>=4.4.1",
+  "torch>=2.11.0",
+  "torchvision>=0.26.0",
 ]
 
 [dependency-groups]
-dev = [
-    "ruff>=0.15.9",
-]
+dev = ["ruff>=0.15.9"]

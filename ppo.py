@@ -1,3 +1,9 @@
+import warnings
+
+warnings.filterwarnings(
+    "ignore", message="pkg_resources is deprecated as an API", category=UserWarning
+)
+
 import argparse
 import multiprocessing as mp
 import random
