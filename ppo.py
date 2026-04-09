@@ -1,3 +1,14 @@
+"""
+PPO Implementation
+
+References:
+    - https://arxiv.org/pdf/1707.06347
+    - https://arxiv.org/pdf/1506.02438
+    - https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
+    - https://arxiv.org/pdf/2006.05990
+    - https://github.com/vwxyzjn/cleanrl
+"""
+
 import warnings
 
 warnings.filterwarnings(
@@ -57,9 +68,9 @@ class ActorCritic(nn.Module):
         super().__init__()
         self.trunk = nn.Sequential(
             layer_init(nn.Linear(state_dim, hidden_size)),
-            nn.ReLU(),
+            nn.Tanh(),
             layer_init(nn.Linear(hidden_size, hidden_size)),
-            nn.ReLU(),
+            nn.Tanh(),
         )
         self.policy_logits = layer_init(nn.Linear(hidden_size, action_dim), std=0.01)
         self.value = layer_init(nn.Linear(hidden_size, 1), std=1.0)
@@ -179,9 +190,9 @@ def train(
     n_actors=16,
     T=512,
     gamma=0.99,
-    lambd=0.95,
-    bs=128,
-    eps: float = 0.2,
+    lambd=0.9,
+    bs=256,
+    eps: float = 0.25,
 ):
     model = ActorCritic(ENV_STATE_DIM, ENV_ACTION_DIM)
     model.compile()
