@@ -22,6 +22,7 @@ import time
 from contextlib import contextmanager
 from typing import Tuple
 
+import envpool
 import gymnasium as gym
 import numpy as np
 import torch
@@ -118,60 +119,72 @@ def normalize(x: Tensor, eps: float = 1e-8) -> Tensor:
 
 def rollout(
     model: ActorCritic,
+    N: int,
     T: int,
     gamma: float,
     lambd: float,
 ) -> Tuple[
     Tensor, Tensor, Tensor, Tensor, Tensor, float
 ]:  # (states, actions, action_logps, values, advantages)
-    states = np.zeros((T, ENV_STATE_DIM), dtype=np.float32)
-    actions = np.zeros(T, dtype=np.int64)
-    action_logps = np.zeros(T, dtype=np.float32)
-    rewards = np.zeros(T, dtype=np.float32)
-    value_ests = np.zeros(T, dtype=np.float32)
-    dones = np.zeros(T, dtype=bool)
+    states = np.zeros((N, T, ENV_STATE_DIM), dtype=np.float32)
+    actions = np.zeros((N, T), dtype=np.int64)
+    action_logps = np.zeros((N, T), dtype=np.float32)
+    rewards = np.zeros((N, T), dtype=np.float32)
+    value_ests = np.zeros((N, T), dtype=np.float32)
+    dones = np.zeros((N, T), dtype=bool)
 
-    with get_env() as env:
-        observation, _ = env.reset()
-        for t in range(T):
-            with torch.no_grad():
-                action_dist, pred_value = model(torch.from_numpy(observation))
-                action = action_dist.sample()
+    env = envpool.make_gymnasium(
+        ENV_NAME,
+        num_envs=N,
+        seed=SEED,
+    )
 
-            action_logps[t] = action_dist.log_prob(action)
-            action = action.item()
+    observations, _ = env.reset()
+    for t in range(T):
+        with torch.no_grad():
+            actions_dists, pred_values = model(torch.from_numpy(observations))
 
-            states[t] = observation
-            actions[t] = action
-            value_ests[t] = pred_value.item()
+        sampled_actions = actions_dists.sample()  # (N, )
+        action_logps[:, t] = actions_dists.log_prob(sampled_actions)
+        states[:, t] = observations
+        actions[:, t] = sampled_actions
+        value_ests[:, t] = pred_values
 
-            observation, reward, terminated, truncated, _ = env.step(action)
+        observations, step_rewards, terminateds, truncateds, _ = env.step(
+            sampled_actions.numpy()
+        )
 
-            rewards[t] = reward
-            if truncated or terminated:
-                dones[t] = True
-                observation, _ = env.reset()
+        rewards[:, t] = step_rewards
+        # parallel envs automatically reset when done
+        dones[:, t] = terminateds | truncateds
+    env.close()
     avg_episode_reward = rewards.sum() / max(dones.sum(), 1)
 
     with torch.no_grad():
-        _, last_pred_value = model(torch.tensor(observation))
-        last_pred_value = last_pred_value.item()
+        _, last_pred_values = model(torch.from_numpy(observations))
 
-    advantages = np.zeros(T, dtype=np.float32)
-    # Special case for final state (no future rewards)
-    if not dones[T - 1]:
-        advantages[T - 1] = rewards[T - 1] + gamma * last_pred_value - value_ests[T - 1]
-    else:
-        advantages[T - 1] = rewards[T - 1] - value_ests[T - 1]
+    advantages = np.zeros((N, T), dtype=np.float32)
+    for i in range(N):
+        # Special case for final state (no future rewards)
+        if not dones[i, T - 1]:
+            advantages[i, T - 1] = (
+                rewards[i, T - 1]
+                + gamma * last_pred_values[i].item()
+                - value_ests[i, T - 1]
+            )
+        else:
+            advantages[i, T - 1] = rewards[i, T - 1] - value_ests[i, T - 1]
 
-    for t in reversed(range(T - 1)):
-        if not dones[t]:
-            # TD error: how much does value est. differ from Bellman equation
-            delta_t = rewards[t] + gamma * value_ests[t + 1] - value_ests[t]
-            # recursive formulation of GAE
-            advantages[t] = delta_t + gamma * lambd * advantages[t + 1]
-        else:  # episode over, future rewards aren't relevant
-            advantages[t] = rewards[t] - value_ests[t]
+        for t in reversed(range(T - 1)):
+            if not dones[i, t]:
+                # TD error: how much does value est. differ from Bellman equation
+                delta_t = (
+                    rewards[i, t] + gamma * value_ests[i, t + 1] - value_ests[i, t]
+                )
+                # recursive formulation of GAE
+                advantages[i, t] = delta_t + gamma * lambd * advantages[i, t + 1]
+            else:  # episode over, future rewards aren't relevant
+                advantages[i, t] = rewards[i, t] - value_ests[i, t]
 
     values = advantages + value_ests
 
@@ -204,9 +217,6 @@ def train(
     for i in range(n_rollouts):
         print(f"\n=== ROLLOUT {i + 1} ===")
         rollout_start = time.perf_counter()
-        with mp.Pool(n_actors) as pool:
-            results = pool.starmap(rollout, [(model.cpu(), T, gamma, lambd)] * n_actors)
-
         (
             all_states,
             all_actions,
@@ -214,13 +224,7 @@ def train(
             all_values,
             all_advantages,
             all_avg_rewards,
-        ) = zip(*results)
-
-        all_states = torch.cat(all_states).to(device)
-        all_actions = torch.cat(all_actions).to(device)
-        all_action_logps = torch.cat(all_action_logps).to(device)
-        all_values = torch.cat(all_values).to(device)
-        all_advantages = normalize(torch.cat(all_advantages)).to(device)
+        ) = rollout(model.cpu(), n_actors, T, gamma, lambd)
 
         print(f"Avg. reward: {np.mean(all_avg_rewards):.2f}")
 
@@ -234,7 +238,11 @@ def train(
         model.train()
         # Create a simple dataset and dataloader for batching
         dataset = torch.utils.data.TensorDataset(
-            all_states, all_actions, all_action_logps, all_advantages, all_values
+            all_states.flatten(0, 1).to(device),
+            all_actions.flatten().to(device),
+            all_action_logps.flatten().to(device),
+            all_advantages.flatten().to(device),
+            all_values.flatten().to(device),
         )
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=bs, shuffle=True)
 
